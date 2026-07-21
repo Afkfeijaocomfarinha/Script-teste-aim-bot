@@ -1,0 +1,394 @@
+--[[
+    Aim Bot para Rivals (Roblox)
+    Interface simples com botão e keybind
+    Otimizado com organização e comentários
+]]
+
+-- Serviços
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+-- Configurações
+local CONFIG = {
+    -- Tecla padrão para ativar/desativar (LeftAlt)
+    DEFAULT_KEY = Enum.KeyCode.LeftAlt,
+    -- Distância máxima para mira (estudios)
+    MAX_DISTANCE = 1000,
+    -- Suavidade da mira (0 = instantâneo, 1 = mais suave)
+    SMOOTHNESS = 0.3,
+}
+
+-- Estado do Aim Bot
+local AimBot = {
+    enabled = false,        -- Ativado/desativado pelo botão
+    keyPressed = false,     -- Tecla de ativação pressionada
+    active = false,         -- Realmente ativo (enabled + keyPressed)
+    keybind = CONFIG.DEFAULT_KEY,
+    currentTarget = nil,
+    camera = workspace.CurrentCamera,
+}
+
+-- Variáveis para suavidade
+local lastTargetPosition = nil
+local lastTargetTime = 0
+
+--====================================================--
+--                FUNÇÕES PRINCIPAIS                   --
+--====================================================--
+
+-- Obtém o jogador mais próximo do cursor
+local function getClosestPlayerToCursor()
+    local player = Players.LocalPlayer
+    if not player or not player.Character then return nil end
+    
+    local character = player.Character
+    local humanoidRootPart = character:FindFirstChild("HumanoidRootPart")
+    if not humanoidRootPart then return nil end
+    
+    local mouse = player:GetMouse()
+    local camera = AimBot.camera
+    
+    -- Pega a posição do mouse no mundo (raycast)
+    local ray = camera:ScreenPointToRay(mouse.X, mouse.Y)
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    raycastParams.FilterDescendantsInstances = {character}
+    
+    local result = workspace:Raycast(ray.Origin, ray.Direction * CONFIG.MAX_DISTANCE, raycastParams)
+    local cursorWorldPos = result and result.Position or (ray.Origin + ray.Direction * CONFIG.MAX_DISTANCE)
+    
+    local closestPlayer = nil
+    local closestDistance = math.huge
+    
+    -- Itera sobre todos os jogadores
+    for _, otherPlayer in pairs(Players:GetPlayers()) do
+        if otherPlayer ~= player and otherPlayer.Character then
+            local head = otherPlayer.Character:FindFirstChild("Head")
+            if head then
+                -- Verifica se o jogador está visível (raycast)
+                local checkRay = RaycastParams.new()
+                checkRay.FilterType = Enum.RaycastFilterType.Blacklist
+                checkRay.FilterDescendantsInstances = {character, otherPlayer.Character}
+                
+                local visCheck = workspace:Raycast(
+                    humanoidRootPart.Position,
+                    (head.Position - humanoidRootPart.Position).Unit * CONFIG.MAX_DISTANCE,
+                    checkRay
+                )
+                
+                -- Se não tiver obstáculo ou o obstáculo for o próprio alvo
+                if not visCheck or visCheck.Instance:IsDescendantOf(otherPlayer.Character) then
+                    -- Calcula distância do cursor até a cabeça
+                    local headScreenPos, onScreen = camera:WorldToScreenPoint(head.Position)
+                    if onScreen then
+                        local screenDist = (Vector2.new(mouse.X, mouse.Y) - Vector2.new(headScreenPos.X, headScreenPos.Y)).Magnitude
+                        if screenDist < closestDistance then
+                            closestDistance = screenDist
+                            closestPlayer = otherPlayer
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    return closestPlayer
+end
+
+-- Função principal de mira
+local function aimAtTarget(target)
+    if not target or not target.Character then return end
+    
+    local head = target.Character:FindFirstChild("Head")
+    if not head then return end
+    
+    local camera = AimBot.camera
+    local currentCFrame = camera.CFrame
+    
+    -- Calcula a posição da cabeça com pequeno offset para cima (centro da cabeça)
+    local targetPos = head.Position + Vector3.new(0, 0.3, 0)
+    
+    -- Aplica suavidade se ativada
+    if CONFIG.SMOOTHNESS > 0 and lastTargetPosition then
+        local deltaTime = tick() - lastTargetTime
+        local smoothFactor = math.min(CONFIG.SMOOTHNESS * deltaTime * 30, 1)
+        targetPos = lastTargetPosition:Lerp(targetPos, smoothFactor)
+    end
+    
+    lastTargetPosition = targetPos
+    lastTargetTime = tick()
+    
+    -- Calcula a nova rotação da câmera
+    local lookAt = CFrame.lookAt(camera.CFrame.Position, targetPos)
+    camera.CFrame = lookAt
+end
+
+-- Loop principal (executado a cada frame)
+local function onRenderStep()
+    -- Verifica se o Aim Bot está ativo
+    AimBot.active = AimBot.enabled and AimBot.keyPressed
+    
+    if not AimBot.active then
+        AimBot.currentTarget = nil
+        lastTargetPosition = nil
+        return
+    end
+    
+    -- Encontra o alvo mais próximo
+    local target = getClosestPlayerToCursor()
+    AimBot.currentTarget = target
+    
+    if target then
+        aimAtTarget(target)
+    end
+end
+
+--====================================================--
+--               GERENCIAMENTO DE TECLAS              --
+--====================================================--
+
+-- Detecta quando a tecla é pressionada
+local function onInputBegan(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.KeyCode == AimBot.keybind then
+        AimBot.keyPressed = true
+    end
+end
+
+-- Detecta quando a tecla é solta
+local function onInputEnded(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.KeyCode == AimBot.keybind then
+        AimBot.keyPressed = false
+        lastTargetPosition = nil
+    end
+end
+
+--====================================================--
+--                   INTERFACE UI                      --
+--====================================================--
+
+-- Cria a interface gráfica
+local function createUI()
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "AimBotUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
+    
+    -- Frame principal
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.Size = UDim2.new(0, 250, 0, 120)
+    mainFrame.Position = UDim2.new(0, 20, 0, 20)
+    mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+    mainFrame.BackgroundTransparency = 0.2
+    mainFrame.BorderSizePixel = 2
+    mainFrame.BorderColor3 = Color3.fromRGB(60, 60, 80)
+    mainFrame.Parent = screenGui
+    
+    -- Arredondamento
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = mainFrame
+    
+    -- Shadow (sombra)
+    local shadow = Instance.new("UIShadow")
+    shadow.Parent = mainFrame
+    
+    -- Título
+    local title = Instance.new("TextLabel")
+    title.Name = "Title"
+    title.Size = UDim2.new(1, 0, 0, 30)
+    title.Position = UDim2.new(0, 0, 0, 0)
+    title.BackgroundTransparency = 1
+    title.Text = "🎯 Aim Bot"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.TextSize = 18
+    title.Font = Enum.Font.GothamBold
+    title.Parent = mainFrame
+    
+    -- Botão de ativação
+    local toggleBtn = Instance.new("TextButton")
+    toggleBtn.Name = "ToggleBtn"
+    toggleBtn.Size = UDim2.new(1, -20, 0, 30)
+    toggleBtn.Position = UDim2.new(0, 10, 0, 40)
+    toggleBtn.BackgroundColor3 = Color3.fromRGB(60, 180, 60)
+    toggleBtn.Text = "🔴 Desativado"
+    toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    toggleBtn.TextSize = 14
+    toggleBtn.Font = Enum.Font.Gotham
+    toggleBtn.Parent = mainFrame
+    
+    -- Arredondamento do botão
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 4)
+    btnCorner.Parent = toggleBtn
+    
+    -- Label da tecla
+    local keyLabel = Instance.new("TextLabel")
+    keyLabel.Name = "KeyLabel"
+    keyLabel.Size = UDim2.new(0, 80, 0, 25)
+    keyLabel.Position = UDim2.new(0, 10, 0, 80)
+    keyLabel.BackgroundTransparency = 1
+    keyLabel.Text = "Tecla: [Alt]"
+    keyLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    keyLabel.TextSize = 13
+    keyLabel.Font = Enum.Font.Gotham
+    keyLabel.TextXAlignment = Enum.TextXAlignment.Left
+    keyLabel.Parent = mainFrame
+    
+    -- Botão para mudar keybind (pequeno)
+    local changeKeyBtn = Instance.new("TextButton")
+    changeKeyBtn.Name = "ChangeKeyBtn"
+    changeKeyBtn.Size = UDim2.new(0, 60, 0, 25)
+    changeKeyBtn.Position = UDim2.new(1, -70, 0, 80)
+    changeKeyBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+    changeKeyBtn.Text = "Mudar"
+    changeKeyBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    changeKeyBtn.TextSize = 12
+    changeKeyBtn.Font = Enum.Font.Gotham
+    changeKeyBtn.Parent = mainFrame
+    
+    local changeKeyCorner = Instance.new("UICorner")
+    changeKeyCorner.CornerRadius = UDim.new(0, 4)
+    changeKeyCorner.Parent = changeKeyBtn
+    
+    --====================================================--
+    --              FUNÇÕES DA INTERFACE                  --
+    --====================================================--
+    
+    -- Atualiza o estado do botão
+    local function updateToggleButton()
+        if AimBot.enabled then
+            toggleBtn.BackgroundColor3 = Color3.fromRGB(60, 180, 60)
+            toggleBtn.Text = "✅ Ativado"
+        else
+            toggleBtn.BackgroundColor3 = Color3.fromRGB(180, 60, 60)
+            toggleBtn.Text = "🔴 Desativado"
+        end
+    end
+    
+    -- Atualiza o texto da tecla
+    local function updateKeyLabel()
+        local keyName = tostring(AimBot.keybind):gsub("Enum.KeyCode.", "")
+        keyLabel.Text = "Tecla: [" .. keyName .. "]"
+    end
+    
+    -- Alterna o Aim Bot
+    toggleBtn.MouseButton1Click:Connect(function()
+        AimBot.enabled = not AimBot.enabled
+        if not AimBot.enabled then
+            AimBot.keyPressed = false
+            lastTargetPosition = nil
+        end
+        updateToggleButton()
+    end)
+    
+    -- Mudar keybind (modo de captura)
+    local waitingForKey = false
+    
+    changeKeyBtn.MouseButton1Click:Connect(function()
+        if waitingForKey then return end
+        
+        waitingForKey = true
+        changeKeyBtn.Text = "Pressione..."
+        changeKeyBtn.BackgroundColor3 = Color3.fromRGB(200, 150, 50)
+        keyLabel.Text = "Aguardando tecla..."
+        
+        -- Conecta para capturar a próxima tecla pressionada
+        local connection
+        connection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+            if gameProcessed then return end
+            
+            if input.KeyCode ~= Enum.KeyCode.Unknown then
+                AimBot.keybind = input.KeyCode
+                updateKeyLabel()
+                
+                -- Remove a conexão
+                connection:Disconnect()
+                waitingForKey = false
+                changeKeyBtn.Text = "Mudar"
+                changeKeyBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+                
+                -- Feedback visual rápido
+                changeKeyBtn.BackgroundColor3 = Color3.fromRGB(60, 180, 60)
+                task.wait(0.2)
+                changeKeyBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+            end
+        end)
+        
+        -- Cancela se o usuário clicar fora
+        local cancelConnection
+        cancelConnection = toggleBtn.MouseButton1Click:Connect(function()
+            if waitingForKey then
+                connection:Disconnect()
+                cancelConnection:Disconnect()
+                waitingForKey = false
+                changeKeyBtn.Text = "Mudar"
+                changeKeyBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+                updateKeyLabel()
+            end
+        end)
+    end)
+    
+    -- Inicializa os textos
+    updateToggleButton()
+    updateKeyLabel()
+    
+    return screenGui
+end
+
+--====================================================--
+--                INICIALIZAÇÃO                       --
+--====================================================--
+
+-- Conecta os eventos
+UserInputService.InputBegan:Connect(onInputBegan)
+UserInputService.InputEnded:Connect(onInputEnded)
+
+-- Conecta o loop de renderização
+RunService.RenderStepped:Connect(onRenderStep)
+
+-- Cria a interface
+local ui = createUI()
+
+-- Mensagem de inicialização
+print("🎯 Aim Bot carregado!")
+print("🔑 Tecla padrão: Alt (pressione para mirar)")
+print("📌 Use 'Mudar' para alterar a tecla")
+
+--====================================================--
+--              LIMPEZA E OTIMIZAÇÃO                  --
+--====================================================--
+
+-- Desativa o Aim Bot se o jogador morrer ou sair
+Players.LocalPlayer.CharacterAdded:Connect(function()
+    AimBot.keyPressed = false
+    lastTargetPosition = nil
+    AimBot.currentTarget = nil
+end)
+
+-- Quando o jogo fechar, limpa os recursos
+game:BindToClose(function()
+    -- Desconecta tudo (opcional, mas boa prática)
+    RunService.RenderStepped:Disconnect()
+end)
+
+--[[
+    INSTRUÇÕES DE USO:
+    1. Execute o script em um LocalScript (starter player scripts)
+    2. Interface aparecerá no canto superior esquerdo
+    3. Clique em "Ativado" para ligar o Aim Bot
+    4. Pressione Alt (ou tecla definida) para mirar
+    5. Solte a tecla para parar de mirar
+    6. Use "Mudar" para definir outra tecla
+
+    OBSERVAÇÕES:
+    - Mira na cabeça do jogador mais próximo do cursor
+    - Tem suavidade na mira para não ser tão brusco
+    - Funciona apenas em Rivals (compatível com outros jogos também)
+    - Otimizado com raycast para detectar obstáculos
